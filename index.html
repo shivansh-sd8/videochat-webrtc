@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebRTC Video + Chat Demo</title>
+  <style>
+    body { 
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+      display: flex; 
+      flex-direction: column; 
+      align-items: center; 
+      margin: 0; 
+      padding: 20px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+    }
+    .container {
+      background: white;
+      border-radius: 15px;
+      padding: 30px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+      max-width: 900px;
+      width: 100%;
+    }
+    h2 {
+      color: #333;
+      margin-top: 0;
+      text-align: center;
+    }
+    #status {
+      text-align: center;
+      padding: 10px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      font-weight: 600;
+    }
+    #status.connected { background: #d4edda; color: #155724; }
+    #status.connecting { background: #fff3cd; color: #856404; }
+    #status.disconnected { background: #f8d7da; color: #721c24; }
+    video { 
+      width: 100%; 
+      max-width: 400px;
+      height: 300px; 
+      background: #000; 
+      border-radius: 10px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    }
+    #videos { 
+      display: flex; 
+      justify-content: space-around;
+      gap: 20px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    .video-container {
+      text-align: center;
+    }
+    .video-container h4 {
+      margin: 10px 0;
+      color: #555;
+    }
+    #chat { 
+      margin-top: 20px; 
+      display: flex; 
+      flex-direction: column; 
+      width: 100%;
+    }
+    #messages { 
+      border: 2px solid #e0e0e0; 
+      height: 200px; 
+      overflow-y: auto; 
+      padding: 10px; 
+      margin-bottom: 10px;
+      border-radius: 8px;
+      background: #f9f9f9;
+      font-size: 14px;
+    }
+    .message-input-container {
+      display: flex;
+      gap: 10px;
+    }
+    input[type="text"] { 
+      flex: 1;
+      padding: 12px; 
+      border: 2px solid #e0e0e0;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+    button { 
+      padding: 12px 24px; 
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    #startBtn {
+      background: #667eea;
+      color: white;
+      width: 100%;
+      font-size: 16px;
+      padding: 15px;
+    }
+    #startBtn:hover:not(:disabled) {
+      background: #5568d3;
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }
+    #sendBtn {
+      background: #28a745;
+      color: white;
+    }
+    #sendBtn:hover:not(:disabled) {
+      background: #218838;
+    }
+    .controls {
+      margin-top: 20px;
+      text-align: center;
+    }
+    #userCount {
+      text-align: center;
+      color: #666;
+      margin-bottom: 15px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h2>🎥 WebRTC Video Call</h2>
+  
+  <div id="status" class="disconnected">Disconnected from server</div>
+  <div id="userCount">Users online: 0</div>
+
+  <div class="controls">
+    <button id="startBtn">Start Video Call</button>
+  </div>
+  
+  <div class="controls" id="mediaControls" style="display: none; margin-top: 10px; gap: 10px;">
+    <button id="muteAudioBtn" style="background: #dc3545;">🎤 Mute Audio</button>
+    <button id="muteVideoBtn" style="background: #dc3545;">📹 Stop Video</button>
+  </div>
+
+  <div id="videos">
+    <div class="video-container">
+      <h4>You</h4>
+      <video id="local" autoplay muted playsinline></video>
+    </div>
+    <div class="video-container">
+      <h4>Remote Peer</h4>
+      <video id="remote" autoplay playsinline></video>
+    </div>
+  </div>
+
+  <div id="chat">
+    <h4>Chat</h4>
+    <div id="messages"></div>
+    <div class="message-input-container">
+      <input type="text" id="messageInput" placeholder="Type a message..." />
+      <button id="sendBtn">Send</button>
+    </div>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+let localStream;
+let peerConnection;
+let dataChannel;
+let socket;
+let isInitiator = false;
+let iceCandidateQueue = []; // Queue for ICE candidates received before remote description
+
+// ICE servers configuration (using multiple public STUN servers)
+const configuration = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' }
+  ],
+  iceCandidatePoolSize: 10,
+  iceTransportPolicy: 'all', // Try all candidates (relay, srflx, host)
+  bundlePolicy: 'max-bundle',
+  rtcpMuxPolicy: 'require'
+};
+
+// DOM elements
+const localVideo = document.getElementById('local');
+const remoteVideo = document.getElementById('remote');
+const messages = document.getElementById('messages');
+const messageInput = document.getElementById('messageInput');
+const sendBtn = document.getElementById('sendBtn');
+const startBtn = document.getElementById('startBtn');
+const statusDiv = document.getElementById('status');
+const userCountDiv = document.getElementById('userCount');
+const mediaControls = document.getElementById('mediaControls');
+const muteAudioBtn = document.getElementById('muteAudioBtn');
+const muteVideoBtn = document.getElementById('muteVideoBtn');
+
+let isAudioMuted = false;
+let isVideoMuted = false;
+
+// Initialize socket connection
+function initSocket() {
+  socket = io();
+
+  socket.on('connect', () => {
+    updateStatus('connecting', 'Connected to server - Waiting for peer...');
+    logMessage('✅ Connected to signaling server');
+  });
+
+  socket.on('disconnect', () => {
+    updateStatus('disconnected', 'Disconnected from server');
+    logMessage('❌ Disconnected from server');
+  });
+
+  socket.on('user-count', (count) => {
+    userCountDiv.textContent = `Users online: ${count}`;
+  });
+
+  socket.on('start-call', async (data) => {
+    if (!peerConnection && localStream) {
+      logMessage('👥 Both peers ready! Establishing connection...');
+      // Only the designated initiator creates the offer
+      if (data && data.initiator === socket.id) {
+        isInitiator = true;
+        createPeerConnection();
+        await createAndSendOffer();
+      } else {
+        // Other peer just waits for offer
+        logMessage('⏳ Waiting for offer from peer...');
+      }
+    }
+  });
+
+  socket.on('offer', async (data) => {
+    logMessage('📨 Received offer from peer');
+    // If we already have a peer connection and we're the initiator, ignore this offer
+    if (peerConnection && isInitiator) {
+      logMessage('⚠️ Ignoring offer - already initiated connection');
+      return;
+    }
+    isInitiator = false;
+    await handleOffer(data.offer);
+  });
+
+  socket.on('answer', async (data) => {
+    logMessage('📨 Received answer from peer');
+    await handleAnswer(data.answer);
+  });
+
+  socket.on('ice-candidate', async (data) => {
+    await handleIceCandidate(data.candidate);
+  });
+}
+
+// Update status display
+function updateStatus(state, message) {
+  statusDiv.className = state;
+  statusDiv.textContent = message;
+}
+
+// Log message to chat
+function logMessage(msg) {
+  const time = new Date().toLocaleTimeString();
+  messages.innerHTML += `<div><small>[${time}]</small> ${msg}</div>`;
+  messages.scrollTop = messages.scrollHeight;
+}
+
+// Initialize peer connection
+function createPeerConnection() {
+  peerConnection = new RTCPeerConnection(configuration);
+
+  // Add local tracks
+  localStream.getTracks().forEach(track => {
+    const sender = peerConnection.addTrack(track, localStream);
+    logMessage(`📤 Added local ${track.kind} track to peer connection`);
+  });
+
+  // Handle remote tracks
+  peerConnection.ontrack = (event) => {
+    logMessage(`🎥 Receiving remote ${event.track.kind} track`);
+    if (event.streams && event.streams[0]) {
+      remoteVideo.srcObject = event.streams[0];
+      // Force video to play
+      remoteVideo.play().catch(err => logMessage(`⚠️ Video play error: ${err.message}`));
+      logMessage('✅ Remote video stream attached');
+      updateStatus('connected', '✅ Connected - Video call active');
+    } else {
+      logMessage('⚠️ No stream in track event');
+    }
+  };
+
+  // Handle ICE candidates
+  peerConnection.onicecandidate = (event) => {
+    if (event.candidate) {
+      logMessage(`📡 Sending ICE candidate: ${event.candidate.type}`);
+      socket.emit('ice-candidate', { candidate: event.candidate });
+    } else {
+      logMessage('📡 All ICE candidates sent');
+    }
+  };
+
+  // Monitor connection state
+  peerConnection.onconnectionstatechange = () => {
+    logMessage(`Connection state: ${peerConnection.connectionState}`);
+    if (peerConnection.connectionState === 'connected') {
+      updateStatus('connected', '✅ Connected - Video call active');
+      // Debug: Check what tracks we're sending/receiving
+      const senders = peerConnection.getSenders();
+      const receivers = peerConnection.getReceivers();
+      logMessage(`📊 Sending ${senders.length} tracks, Receiving ${receivers.length} tracks`);
+      
+      // Fallback: If we have receivers but no remote video, manually attach the stream
+      if (receivers.length > 0 && !remoteVideo.srcObject) {
+        const remoteStream = new MediaStream();
+        receivers.forEach(receiver => {
+          if (receiver.track) {
+            remoteStream.addTrack(receiver.track);
+            logMessage(`🔧 Manually added ${receiver.track.kind} track to remote stream`);
+          }
+        });
+        if (remoteStream.getTracks().length > 0) {
+          remoteVideo.srcObject = remoteStream;
+          remoteVideo.play().catch(err => logMessage(`⚠️ Video play error: ${err.message}`));
+          logMessage('✅ Remote video stream manually attached');
+        }
+      }
+    } else if (peerConnection.connectionState === 'disconnected' || 
+               peerConnection.connectionState === 'failed') {
+      updateStatus('disconnected', 'Connection lost');
+    }
+  };
+  
+  // Debug ICE connection state
+  peerConnection.oniceconnectionstatechange = () => {
+    logMessage(`ICE state: ${peerConnection.iceConnectionState}`);
+  };
+
+  // Create data channel for chat (only initiator creates it)
+  if (isInitiator) {
+    dataChannel = peerConnection.createDataChannel('chat');
+    setupDataChannel(dataChannel);
+  } else {
+    peerConnection.ondatachannel = (event) => {
+      dataChannel = event.channel;
+      setupDataChannel(dataChannel);
+    };
+  }
+}
+
+// Setup data channel handlers
+function setupDataChannel(channel) {
+  channel.onopen = () => {
+    logMessage('💬 Chat channel opened');
+    sendBtn.disabled = false;
+  };
+
+  channel.onclose = () => {
+    logMessage('💬 Chat channel closed');
+    sendBtn.disabled = true;
+  };
+
+  channel.onmessage = (event) => {
+    logMessage(`<strong>Peer:</strong> ${event.data}`);
+  };
+}
+
+// Start camera and initiate connection
+startBtn.onclick = async () => {
+  try {
+    // Check if getUserMedia is available
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('getUserMedia is not supported. Please use HTTPS or add this site to chrome://flags "Insecure origins treated as secure"');
+    }
+
+    logMessage('🎥 Requesting camera and microphone access...');
+    
+    // Get user media
+    localStream = await navigator.mediaDevices.getUserMedia({ 
+      video: true, 
+      audio: true 
+    });
+    localVideo.srcObject = localStream;
+    logMessage('📹 Camera and microphone started');
+    
+    startBtn.disabled = true;
+    startBtn.textContent = 'Camera Active';
+    
+    // Show media controls
+    mediaControls.style.display = 'flex';
+
+    // Signal to server that we're ready
+    socket.emit('ready');
+    logMessage('⏳ Waiting for peer to join...');
+
+  } catch (err) {
+    console.error('Full error:', err);
+    logMessage(`❌ Error: ${err.name} - ${err.message}`);
+    
+    let errorMsg = `Could not access camera/mic: ${err.message}\n\n`;
+    
+    if (err.name === 'NotAllowedError') {
+      errorMsg += 'You denied camera/microphone permission. Please allow it and try again.';
+    } else if (err.name === 'NotFoundError') {
+      errorMsg += 'No camera or microphone found on this device.';
+    } else if (err.name === 'NotReadableError') {
+      errorMsg += 'Camera/microphone is already in use by another application.';
+    } else if (err.message.includes('getUserMedia')) {
+      errorMsg += '\n🔧 FIX: On Chrome, go to chrome://flags\nSearch: "Insecure origins treated as secure"\nAdd: ' + window.location.origin + '\nThen restart Chrome.';
+    }
+    
+    alert(errorMsg);
+  }
+};
+
+// Create and send offer
+async function createAndSendOffer() {
+  try {
+    const offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+    socket.emit('offer', { offer: offer });
+    logMessage('📤 Sent offer to peer');
+  } catch (err) {
+    logMessage(`❌ Error creating offer: ${err.message}`);
+  }
+}
+
+// Handle incoming offer
+async function handleOffer(offer) {
+  if (!peerConnection) {
+    // Create peer connection but DON'T add tracks yet
+    peerConnection = new RTCPeerConnection(configuration);
+    
+    // Handle remote tracks
+    peerConnection.ontrack = (event) => {
+      logMessage(`🎥 Receiving remote ${event.track.kind} track`);
+      if (event.streams && event.streams[0]) {
+        remoteVideo.srcObject = event.streams[0];
+        // Force video to play
+        remoteVideo.play().catch(err => logMessage(`⚠️ Video play error: ${err.message}`));
+        logMessage('✅ Remote video stream attached');
+        updateStatus('connected', '✅ Connected - Video call active');
+      } else {
+        logMessage('⚠️ No stream in track event');
+      }
+    };
+    
+    // Handle ICE candidates
+    peerConnection.onicecandidate = (event) => {
+      if (event.candidate) {
+        socket.emit('ice-candidate', { candidate: event.candidate });
+      }
+    };
+    
+    // Monitor connection state
+    peerConnection.onconnectionstatechange = () => {
+      logMessage(`Connection state: ${peerConnection.connectionState}`);
+      if (peerConnection.connectionState === 'connected') {
+        updateStatus('connected', '✅ Connected - Video call active');
+        // Debug: Check what tracks we're sending/receiving
+        const senders = peerConnection.getSenders();
+        const receivers = peerConnection.getReceivers();
+        logMessage(`📊 Sending ${senders.length} tracks, Receiving ${receivers.length} tracks`);
+      } else if (peerConnection.connectionState === 'disconnected' || 
+                 peerConnection.connectionState === 'failed') {
+        updateStatus('disconnected', 'Connection lost');
+      }
+    };
+    
+    // Debug ICE connection state
+    peerConnection.oniceconnectionstatechange = () => {
+      logMessage(`ICE state: ${peerConnection.iceConnectionState}`);
+    };
+    
+    // Setup data channel listener (answerer receives it)
+    peerConnection.ondatachannel = (event) => {
+      dataChannel = event.channel;
+      setupDataChannel(dataChannel);
+    };
+    
+    // NOW add local tracks
+    localStream.getTracks().forEach(track => {
+      peerConnection.addTrack(track, localStream);
+      logMessage(`📤 Added local ${track.kind} track`);
+    });
+  }
+  
+  try {
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+    
+    // Process any queued ICE candidates
+    while (iceCandidateQueue.length > 0) {
+      const candidate = iceCandidateQueue.shift();
+      await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+    }
+    
+    const answer = await peerConnection.createAnswer();
+    await peerConnection.setLocalDescription(answer);
+    socket.emit('answer', { answer: answer });
+    logMessage('📤 Sent answer to peer');
+  } catch (err) {
+    logMessage(`❌ Error handling offer: ${err.message}`);
+  }
+}
+
+// Handle incoming answer
+async function handleAnswer(answer) {
+  try {
+    // Check if we're in the right state to receive an answer
+    if (!peerConnection) {
+      logMessage('⚠️ No peer connection exists');
+      return;
+    }
+    
+    if (peerConnection.signalingState !== 'have-local-offer') {
+      logMessage(`⚠️ Ignoring answer - wrong state: ${peerConnection.signalingState}`);
+      return;
+    }
+    
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+    
+    // Process any queued ICE candidates
+    while (iceCandidateQueue.length > 0) {
+      const candidate = iceCandidateQueue.shift();
+      await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+    }
+    
+    logMessage('✅ Connection established');
+  } catch (err) {
+    logMessage(`❌ Error handling answer: ${err.message}`);
+  }
+}
+
+// Handle incoming ICE candidate
+async function handleIceCandidate(candidate) {
+  try {
+    if (!peerConnection) {
+      // Queue candidate if peer connection doesn't exist yet
+      iceCandidateQueue.push(candidate);
+      logMessage(`📥 Queued ICE candidate (no peer connection yet)`);
+      return;
+    }
+    
+    if (peerConnection.remoteDescription && peerConnection.remoteDescription.type) {
+      // Remote description is set, add candidate immediately
+      await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+      logMessage(`📥 Added ICE candidate: ${candidate.type || 'unknown'}`);
+    } else {
+      // Queue candidate until remote description is set
+      iceCandidateQueue.push(candidate);
+      logMessage(`📥 Queued ICE candidate (waiting for remote description)`);
+    }
+  } catch (err) {
+    logMessage(`❌ Error adding ICE candidate: ${err.message}`);
+  }
+}
+
+// Send chat message
+sendBtn.onclick = () => {
+  const msg = messageInput.value.trim();
+  if (!msg) return;
+  
+  if (dataChannel && dataChannel.readyState === 'open') {
+    dataChannel.send(msg);
+    logMessage(`<strong>You:</strong> ${msg}`);
+    messageInput.value = '';
+  } else {
+    logMessage('❌ Chat not available - connection not established');
+  }
+};
+
+// Send message on Enter key
+messageInput.onkeypress = (e) => {
+  if (e.key === 'Enter') {
+    sendBtn.onclick();
+  }
+};
+
+// Mute/Unmute Audio
+muteAudioBtn.onclick = () => {
+  if (localStream) {
+    const audioTrack = localStream.getAudioTracks()[0];
+    if (audioTrack) {
+      isAudioMuted = !isAudioMuted;
+      audioTrack.enabled = !isAudioMuted;
+      muteAudioBtn.textContent = isAudioMuted ? '🔇 Unmute Audio' : '🎤 Mute Audio';
+      muteAudioBtn.style.background = isAudioMuted ? '#28a745' : '#dc3545';
+      logMessage(isAudioMuted ? '🔇 Audio muted' : '🎤 Audio unmuted');
+    }
+  }
+};
+
+// Stop/Start Video
+muteVideoBtn.onclick = () => {
+  if (localStream) {
+    const videoTrack = localStream.getVideoTracks()[0];
+    if (videoTrack) {
+      isVideoMuted = !isVideoMuted;
+      videoTrack.enabled = !isVideoMuted;
+      muteVideoBtn.textContent = isVideoMuted ? '📹 Start Video' : '📹 Stop Video';
+      muteVideoBtn.style.background = isVideoMuted ? '#28a745' : '#dc3545';
+      logMessage(isVideoMuted ? '📹 Video stopped' : '📹 Video started');
+    }
+  }
+};
+
+// Initialize socket connection on page load
+initSocket();
+</script>
+
+</body>
+</html>
