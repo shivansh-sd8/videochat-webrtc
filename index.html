@@ -176,20 +176,37 @@ let socket;
 let isInitiator = false;
 let iceCandidateQueue = []; // Queue for ICE candidates received before remote description
 
-// ICE servers configuration (using multiple public STUN servers)
-const configuration = {
+// ICE servers configuration - will be fetched from server with Twilio TURN
+let configuration = {
   iceServers: [
+    // Default STUN servers
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' }
+    { urls: 'stun:stun1.l.google.com:19302' }
   ],
   iceCandidatePoolSize: 10,
-  iceTransportPolicy: 'all', // Try all candidates (relay, srflx, host)
+  iceTransportPolicy: 'all',
   bundlePolicy: 'max-bundle',
   rtcpMuxPolicy: 'require'
 };
+
+// Fetch Twilio TURN credentials on page load
+async function loadTurnCredentials() {
+  try {
+    const response = await fetch('/turn-credentials');
+    const data = await response.json();
+    if (data.iceServers) {
+      configuration.iceServers = data.iceServers;
+      logMessage('✅ Loaded Twilio TURN servers');
+      console.log('TURN servers:', data.iceServers);
+    }
+  } catch (error) {
+    console.error('Failed to load TURN credentials:', error);
+    logMessage('⚠️ Using default STUN servers only');
+  }
+}
+
+// Load TURN credentials immediately
+loadTurnCredentials();
 
 // DOM elements
 const localVideo = document.getElementById('local');
@@ -223,6 +240,13 @@ function initSocket() {
 
   socket.on('user-count', (count) => {
     userCountDiv.textContent = `Users online: ${count}`;
+  });
+
+  socket.on('ready-count', (count) => {
+    logMessage(`👥 Ready users: ${count}/2`);
+    if (count === 1) {
+      logMessage('⏳ Waiting for one more user to start their camera...');
+    }
   });
 
   socket.on('start-call', async (data) => {
